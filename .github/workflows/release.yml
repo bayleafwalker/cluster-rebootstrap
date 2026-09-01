@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          check-latest: false
+
+      - name: goreleaser release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # G3's boundTo evidence is the release asset SHA-256, not the tag
+      # name alone. Attesting build provenance for every published archive
+      # lets an operator verify, offline, that the asset they downloaded
+      # came from this workflow run and not a tampered upload.
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/*.tar.gz,dist/checksums.txt"
