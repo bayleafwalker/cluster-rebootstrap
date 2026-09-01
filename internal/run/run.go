@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -49,13 +48,22 @@ func LoadRun(dir string) (model.Run, error) {
 	if err := decodeFile(filepath.Join(dir, "run.json"), &result); err != nil {
 		return result, fmt.Errorf("load run: %w", err)
 	}
-	if result.SchemaVersion != model.SchemaVersion || strings.TrimSpace(result.RunID) == "" || strings.TrimSpace(result.ProfileID) == "" || strings.TrimSpace(result.ProfileDigest) == "" {
-		return result, fmt.Errorf("run.json is invalid")
+	if err := model.ValidateRun(result); err != nil {
+		return result, fmt.Errorf("run.json is invalid: %w", err)
 	}
 	return result, nil
 }
 
 func CreateRun(dir string, runValue model.Run) error {
+	return WithLock(dir, true, func() error { return CreateRunLocked(dir, runValue) })
+}
+
+// CreateRunLocked is for callers already inside WithLock (for example, a
+// gate evaluation that must create and append atomically).
+func CreateRunLocked(dir string, runValue model.Run) error {
+	if err := model.ValidateRun(runValue); err != nil {
+		return fmt.Errorf("validate run: %w", err)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -74,6 +82,17 @@ func CreateRun(dir string, runValue model.Run) error {
 }
 
 func AppendGate(dir string, runValue model.Run, report model.GateReport) error {
+	return WithLock(dir, true, func() error { return AppendGateLocked(dir, runValue, report) })
+}
+
+// AppendGateLocked is for callers already inside WithLock.
+func AppendGateLocked(dir string, runValue model.Run, report model.GateReport) error {
+	if err := model.ValidateRun(runValue); err != nil {
+		return fmt.Errorf("validate run: %w", err)
+	}
+	if err := model.ValidateGateReport(report, runValue); err != nil {
+		return err
+	}
 	if report.SchemaVersion != model.SchemaVersion || report.Kind != "gate-report" || report.RunID != runValue.RunID || report.ProfileID != runValue.ProfileID || report.ProfileDigest != runValue.ProfileDigest {
 		return fmt.Errorf("gate report does not match run binding")
 	}
@@ -87,6 +106,102 @@ func AppendGate(dir string, runValue model.Run, report model.GateReport) error {
 		return fmt.Errorf("write gate report: %w", err)
 	}
 	return nil
+}
+
+// Reconcile rebuilds every canonical projection from the durable event
+// journal. It is safe to run after interruption at any journal/projection
+// boundary and acquires the run lock itself.
+func Reconcile(dir string) error {
+	return WithLock(dir, true, func() error {
+		runValue, err := LoadRun(dir)
+		if err != nil {
+			return err
+		}
+		return reconcileLocked(dir, runValue)
+	})
+}
+
+func reconcileLocked(dir string, runValue model.Run) error {
+	file, err := os.Open(filepath.Join(dir, eventsFile))
+	if err != nil {
+		return fmt.Errorf("open event journal for reconcile: %w", err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	var last uint64
+	var eventCount uint64
+	var lastType string
+	var latest *model.GateReport
+	for scanner.Scan() {
+		var event model.Event
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			return fmt.Errorf("invalid event journal: %w", err)
+		}
+		if event.SchemaVersion != model.SchemaVersion || event.RunID != runValue.RunID || event.Sequence != last+1 {
+			return fmt.Errorf("event journal binding or sequence invalid at %d", event.Sequence)
+		}
+		last = event.Sequence
+		eventCount++
+		lastType = event.Type
+		switch event.Type {
+		case "run.created":
+			var created struct {
+				ProfileID     string `json:"profileID"`
+				ProfileDigest string `json:"profileDigest"`
+			}
+			if err := json.Unmarshal(event.Data, &created); err != nil || created.ProfileID != runValue.ProfileID || created.ProfileDigest != runValue.ProfileDigest {
+				return fmt.Errorf("run.created event does not match run binding")
+			}
+		case "gate.evaluated":
+			var report model.GateReport
+			if err := json.Unmarshal(event.Data, &report); err != nil {
+				return fmt.Errorf("decode gate event: %w", err)
+			}
+			if err := model.ValidateGateReport(report, runValue); err != nil {
+				return fmt.Errorf("validate gate event: %w", err)
+			}
+			latest = &report
+		default:
+			return fmt.Errorf("unknown event type %q", event.Type)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read event journal: %w", err)
+	}
+	if eventCount == 0 || lastType == "" {
+		return fmt.Errorf("event journal is empty")
+	}
+	status := model.StatusProjection{
+		SchemaVersion: model.SchemaVersion,
+		RunID:         runValue.RunID,
+		ProfileID:     runValue.ProfileID,
+		ProfileDigest: runValue.ProfileDigest,
+		LastSequence:  last,
+		LastEventType: lastType,
+		EventCount:    eventCount,
+	}
+	if latest != nil {
+		status.GateDecision = latest.Decision
+		status.GateEligible = latest.Eligible
+	}
+	if err := writeAtomic(filepath.Join(dir, statusProjection), status); err != nil {
+		return fmt.Errorf("write reconciled status: %w", err)
+	}
+	if latest != nil {
+		if err := writeAtomic(filepath.Join(dir, gateProjection), *latest); err != nil {
+			return fmt.Errorf("write reconciled gate projection: %w", err)
+		}
+		if err := writeAtomic(filepath.Join(dir, gateReport), *latest); err != nil {
+			return fmt.Errorf("write reconciled gate report: %w", err)
+		}
+	} else {
+		for _, path := range []string{filepath.Join(dir, gateProjection), filepath.Join(dir, gateReport)} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove stale projection: %w", err)
+			}
+		}
+	}
+	return syncDirectory(dir)
 }
 
 func LoadStatus(dir string) (model.StatusProjection, error) {
@@ -241,7 +356,11 @@ func writeAtomic(path string, value any) error {
 	if err := os.Rename(temporaryName, path); err != nil {
 		return err
 	}
-	directory, err := os.Open(filepath.Dir(path))
+	return syncDirectory(filepath.Dir(path))
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
 	if err != nil {
 		return err
 	}

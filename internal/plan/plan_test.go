@@ -55,7 +55,7 @@ func TestDigestIsStableAndExcludesStoredDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if digest != other || digest != "sha256:c50838288549a7a290fec16f81eb1a27cf86a696e53e5516acd541720d5754a4" {
+	if digest != other || digest != "sha256:1c16856fc064f5052f41b7b33ad206e9af396e563091ce747e0e3e2360e44559" {
 		t.Fatalf("unexpected digest stability: %s vs %s", digest, other)
 	}
 }
@@ -87,6 +87,16 @@ func TestDelegatedShellSyntaxRejected(t *testing.T) {
 	}
 }
 
+func TestDelegatedInterpreterWrapperRejected(t *testing.T) {
+	p := syntheticPlan(t)
+	p.Steps[1].Argv = []string{"env", "bash", "-c", "unsafe"}
+	p.Steps[1].Executable = "env"
+	bindDigest(t, &p)
+	if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "invoke a shell") {
+		t.Fatalf("expected interpreter wrapper error, got %v", err)
+	}
+}
+
 func TestDestructiveStepRequiresConfirmation(t *testing.T) {
 	p := syntheticPlan(t)
 	p.Steps[len(p.Steps)-1].Confirmation = nil
@@ -98,12 +108,24 @@ func TestDestructiveStepRequiresConfirmation(t *testing.T) {
 
 func TestConfirmationIsBoundToPlanAndAcknowledgesDestructiveSteps(t *testing.T) {
 	p := syntheticPlan(t)
-	confirmation := OperatorConfirmation{Operator: "operator@example.invalid", AuthorizedAt: "2026-09-01T18:00:00Z", PlanDigest: p.PlanDigest, Acknowledged: map[string]bool{"retire-old-disks": true}}
+	confirmation := OperatorConfirmation{Operator: "operator@example.invalid", AuthorizedAt: "2026-09-01T18:00:00Z", PlanDigest: p.PlanDigest, CheckpointDigest: p.CheckpointDigest, Acknowledged: map[string]string{"retire-old-disks": p.Steps[len(p.Steps)-1].Confirmation.AcknowledgeWith}}
 	if err := confirmation.Validate(p); err != nil {
 		t.Fatal(err)
 	}
 	confirmation.PlanDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	if err := confirmation.Validate(p); err == nil || !strings.Contains(err.Error(), "different plan digest") {
 		t.Fatalf("expected digest binding error, got %v", err)
+	}
+}
+
+func TestConfirmationRejectsUnknownAndMismatchedAcknowledgement(t *testing.T) {
+	p := syntheticPlan(t)
+	confirmation := OperatorConfirmation{Operator: "operator", AuthorizedAt: "2026-09-01T18:00:00Z", PlanDigest: p.PlanDigest, CheckpointDigest: p.CheckpointDigest, Acknowledged: map[string]string{"quiesce-writers": "anything"}}
+	if err := confirmation.Validate(p); err == nil || !strings.Contains(err.Error(), "not a destructive step") {
+		t.Fatalf("expected unknown/non-destructive acknowledgement error, got %v", err)
+	}
+	confirmation.Acknowledged = map[string]string{"retire-old-disks": "wrong text"}
+	if err := confirmation.Validate(p); err == nil || !strings.Contains(err.Error(), "exact operator acknowledgement") {
+		t.Fatalf("expected exact acknowledgement error, got %v", err)
 	}
 }

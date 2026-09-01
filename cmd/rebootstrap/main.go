@@ -38,6 +38,8 @@ func execute(args []string) error {
 		return statusCommand(args[1:])
 	case "report":
 		return reportCommand(args[1:])
+	case "reconcile":
+		return reconcileCommand(args[1:])
 	case "plan":
 		return planCommand(args[1:])
 	default:
@@ -220,6 +222,9 @@ func gateCommand(args []string) error {
 	profilePath := flags.String("profile", "", "profile JSON path")
 	inputPath := flags.String("input", "", "gate evidence JSON path")
 	authorizationPath := flags.String("authorization", "", "explicit operator authorization JSON path")
+	recoveryCommit := flags.String("recovery-commit", "", "immutable recovery commit for a new run")
+	checkpointDigest := flags.String("checkpoint-digest", "", "checkpoint digest for a new run")
+	planDigest := flags.String("plan-digest", "", "execution-plan digest for a new run")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -250,36 +255,52 @@ func gateCommand(args []string) error {
 		if loadErr != nil {
 			return loadErr
 		}
-		if err := model.ValidateAuthorization(*loaded); err != nil {
-			return err
-		}
 		authorization = loaded
 	}
 	var report model.GateReport
 	err = run.WithLock(*runDir, true, func() error {
+		newRun := false
 		runValue, loadErr := run.LoadRun(*runDir)
 		if os.IsNotExist(rootCause(loadErr)) {
 			if strings.TrimSpace(*runID) == "" {
 				return errors.New("--run-id is required when initializing a run")
 			}
+			if strings.TrimSpace(*recoveryCommit) == "" || strings.TrimSpace(*checkpointDigest) == "" || strings.TrimSpace(*planDigest) == "" {
+				return errors.New("--recovery-commit, --checkpoint-digest, and --plan-digest are required when initializing a run")
+			}
 			runValue = model.Run{
-				SchemaVersion: model.SchemaVersion,
-				RunID:         *runID,
-				ProfileID:     profile.ID,
-				ProfileDigest: digest,
-				CreatedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+				SchemaVersion:    model.SchemaVersion,
+				RunID:            *runID,
+				ProfileID:        profile.ID,
+				ProfileDigest:    digest,
+				RecoveryCommit:   *recoveryCommit,
+				CheckpointDigest: *checkpointDigest,
+				PlanDigest:       *planDigest,
+				CreatedAt:        time.Now().UTC().Format(time.RFC3339Nano),
 			}
-			if err := run.CreateRun(*runDir, runValue); err != nil {
-				return err
-			}
+			newRun = true
 		} else if loadErr != nil {
 			return loadErr
 		}
 		if runValue.ProfileID != profile.ID || runValue.ProfileDigest != digest {
 			return fmt.Errorf("profile binding mismatch: run has %s/%s, input has %s/%s", runValue.ProfileID, runValue.ProfileDigest, profile.ID, digest)
 		}
+		if authorization != nil {
+			evidenceDigest, err := model.EvidenceDigest(*input)
+			if err != nil {
+				return err
+			}
+			if err := model.ValidateAuthorization(*authorization, runValue, evidenceDigest); err != nil {
+				return err
+			}
+		}
+		if newRun {
+			if err := run.CreateRunLocked(*runDir, runValue); err != nil {
+				return err
+			}
+		}
 		report = gate.Evaluate(runValue, *profile, *input, authorization)
-		return run.AppendGate(*runDir, runValue, report)
+		return run.AppendGateLocked(*runDir, runValue, report)
 	})
 	if err != nil {
 		return err
@@ -306,6 +327,22 @@ func statusCommand(args []string) error {
 		return err
 	}
 	return printCanonical(status)
+}
+
+func reconcileCommand(args []string) error {
+	flags := flag.NewFlagSet("reconcile", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	runDir := flags.String("run", "", "run directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *runDir == "" {
+		return errors.New("usage: rebootstrap reconcile --run RUN")
+	}
+	if err := run.Reconcile(*runDir); err != nil {
+		return err
+	}
+	return printCanonical(map[string]any{"schemaVersion": 1, "status": "PASS", "reconciled": true})
 }
 
 func reportCommand(args []string) error {
@@ -413,5 +450,5 @@ func rootCause(err error) error {
 }
 
 func usageError() error {
-	return errors.New("usage: rebootstrap profile validate | gate evaluate | plan validate|digest|render|dry-run | status | report")
+	return errors.New("usage: rebootstrap profile validate | gate evaluate | plan validate|digest|render|dry-run | status | report | reconcile")
 }

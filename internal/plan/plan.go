@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 type StepKind string
@@ -37,6 +39,8 @@ type Step struct {
 	ID             string                   `json:"id"`
 	Phase          string                   `json:"phase"`
 	Kind           StepKind                 `json:"kind"`
+	Adapter        string                   `json:"adapter,omitempty"`
+	Executable     string                   `json:"executable,omitempty"`
 	Argv           []string                 `json:"argv,omitempty"`
 	Instruction    string                   `json:"instruction,omitempty"`
 	Mutating       bool                     `json:"mutating"`
@@ -49,19 +53,21 @@ type Step struct {
 }
 
 type Plan struct {
-	SchemaVersion  int    `json:"schemaVersion"`
-	ID             string `json:"id"`
-	ProfileDigest  string `json:"profileDigest"`
-	RecoveryCommit string `json:"recoveryCommit"`
-	PlanDigest     string `json:"planDigest"`
-	Steps          []Step `json:"steps"`
+	SchemaVersion    int    `json:"schemaVersion"`
+	ID               string `json:"id"`
+	ProfileDigest    string `json:"profileDigest"`
+	RecoveryCommit   string `json:"recoveryCommit"`
+	CheckpointDigest string `json:"checkpointDigest,omitempty"`
+	PlanDigest       string `json:"planDigest"`
+	Steps            []Step `json:"steps"`
 }
 
 type OperatorConfirmation struct {
-	Operator     string          `json:"operator"`
-	AuthorizedAt string          `json:"authorizedAt"`
-	PlanDigest   string          `json:"planDigest"`
-	Acknowledged map[string]bool `json:"acknowledged"`
+	Operator         string            `json:"operator"`
+	AuthorizedAt     string            `json:"authorizedAt"`
+	PlanDigest       string            `json:"planDigest"`
+	CheckpointDigest string            `json:"checkpointDigest,omitempty"`
+	Acknowledged     map[string]string `json:"acknowledged"`
 }
 
 // Decode reads a plan while rejecting fields that would otherwise be silently dropped.
@@ -119,6 +125,9 @@ func (p Plan) Validate() error {
 	}
 	if !commitPattern.MatchString(p.RecoveryCommit) {
 		return errors.New("recoveryCommit must be a lowercase immutable commit SHA")
+	}
+	if p.CheckpointDigest != "" && !sha256Pattern.MatchString(p.CheckpointDigest) {
+		return errors.New("checkpointDigest must be a lowercase sha256 digest when supplied")
 	}
 	if !sha256Pattern.MatchString(p.PlanDigest) {
 		return errors.New("planDigest must be a lowercase sha256 digest")
@@ -183,6 +192,12 @@ func validateStep(step Step) error {
 		if err := validateArgv(step.Argv); err != nil {
 			return err
 		}
+		if !idPattern.MatchString(step.Adapter) || !idPattern.MatchString(step.Executable) {
+			return errors.New("delegated steps require typed adapter and executable identities")
+		}
+		if filepath.Base(step.Argv[0]) != step.Executable {
+			return errors.New("executable identity must match argv[0]")
+		}
 	}
 	if step.Destructive && !step.Mutating {
 		return errors.New("destructive steps must be mutating")
@@ -204,7 +219,8 @@ func validateStep(step Step) error {
 }
 
 func validateArgv(argv []string) error {
-	if argv[0] == "sh" || argv[0] == "bash" || argv[0] == "zsh" || strings.HasSuffix(argv[0], "/sh") || strings.HasSuffix(argv[0], "/bash") {
+	base := filepath.Base(argv[0])
+	if base == "sh" || base == "bash" || base == "zsh" || base == "env" || base == "busybox" || base == "python" || base == "python3" || base == "perl" || base == "ruby" || base == "node" || base == "powershell" || base == "pwsh" || base == "cmd" || base == "xargs" {
 		return errors.New("delegated argv cannot invoke a shell")
 	}
 	for _, arg := range argv {
@@ -266,12 +282,28 @@ func (c OperatorConfirmation) Validate(p Plan) error {
 	if strings.TrimSpace(c.Operator) == "" || strings.TrimSpace(c.AuthorizedAt) == "" {
 		return errors.New("operator and authorizedAt are required")
 	}
+	if _, err := time.Parse(time.RFC3339, c.AuthorizedAt); err != nil {
+		return errors.New("operator confirmation authorizedAt must be RFC3339")
+	}
 	if c.PlanDigest != p.PlanDigest {
 		return errors.New("operator confirmation is bound to a different plan digest")
 	}
+	if p.CheckpointDigest != "" && c.CheckpointDigest != p.CheckpointDigest {
+		return errors.New("operator confirmation is bound to a different checkpoint digest")
+	}
+	known := make(map[string]Step, len(p.Steps))
 	for _, step := range p.Steps {
-		if step.Destructive && !c.Acknowledged[step.ID] {
-			return fmt.Errorf("destructive step %q lacks operator acknowledgement", step.ID)
+		known[step.ID] = step
+	}
+	for id := range c.Acknowledged {
+		step, ok := known[id]
+		if !ok || !step.Destructive {
+			return fmt.Errorf("operator acknowledgement %q is not a destructive step", id)
+		}
+	}
+	for _, step := range p.Steps {
+		if step.Destructive && c.Acknowledged[step.ID] != step.Confirmation.AcknowledgeWith {
+			return fmt.Errorf("destructive step %q lacks exact operator acknowledgement", step.ID)
 		}
 	}
 	return nil

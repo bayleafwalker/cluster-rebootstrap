@@ -23,6 +23,10 @@ is eligible. Eligibility is not authorization. The command produces `GO` only
 when a separate, valid operator-authorization document is supplied with
 `--authorization`; otherwise it produces `NO-GO` with `eligible: true`.
 
+Authorization is bound to the run ID, profile digest, recovery commit,
+checkpoint digest, evidence digest, and execution-plan digest. A document from
+another run or checkpoint is rejected before a new run is created.
+
 No command in this release performs cluster mutation.
 
 ## Execution-plan semantics
@@ -30,7 +34,8 @@ No command in this release performs cluster mutation.
 Every plan step declares its phase, dependencies, preconditions, STOP
 conditions, observations, mutation/destruction flags, and whether it is
 automatic, delegated, agent-assisted, or operator-only. Delegated commands use
-an argv array; shell command strings and shell metacharacters are rejected.
+an argv array plus typed adapter/executable identities; shell command strings,
+interpreter wrappers, and shell metacharacters are rejected.
 
 Plans carry a deterministic SHA-256 digest over their typed canonical form.
 Validation rejects stale digests, unknown dependencies, dependency cycles, and
@@ -48,10 +53,14 @@ go run ./cmd/rebootstrap gate evaluate \
   --run-id synthetic-001 \
   --profile examples/synthetic/profile.json \
   --input examples/synthetic/evidence.json \
+  --recovery-commit 0123456789abcdef0123456789abcdef01234567 \
+  --checkpoint-digest sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+  --plan-digest sha256:1c16856fc064f5052f41b7b33ad206e9af396e563091ce747e0e3e2360e44559 \
   --authorization examples/synthetic/authorization.json
 
 go run ./cmd/rebootstrap status --run /tmp/rebootstrap-run
 go run ./cmd/rebootstrap report --run /tmp/rebootstrap-run
+go run ./cmd/rebootstrap reconcile --run /tmp/rebootstrap-run
 
 go run ./cmd/rebootstrap plan validate --file examples/synthetic/plan.json
 go run ./cmd/rebootstrap plan render --file examples/synthetic/plan.json
@@ -61,9 +70,12 @@ go run ./cmd/rebootstrap plan dry-run --file examples/synthetic/plan.json
 The run directory contains `run.json`, `events.ndjson`,
 `projections/status.json`, `projections/gate.json`, and `reports/gate.json`.
 Events are appended before projections are atomically replaced. A lock file
-prevents concurrent writers. Secrets, kubeconfigs, decrypted SOPS documents,
-authorization headers, and raw command output are outside this contract and
-must not be placed in evidence.
+prevents concurrent writers. `rebootstrap reconcile --run RUN` replays the
+durable journal to repair projections after an interrupted write. Evidence is
+validated at the model and journal boundary: it is single-line, bounded, and
+credential-shaped/raw output is rejected. Secrets, kubeconfigs, decrypted SOPS
+documents, authorization headers, and raw command output cannot be placed in
+evidence.
 
 ## Development
 

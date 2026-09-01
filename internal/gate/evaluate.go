@@ -14,13 +14,18 @@ func Evaluate(run model.Run, profile model.Profile, input model.GateInput, autho
 			allPass = false
 		}
 	}
-	authorized := authorization != nil && model.ValidateAuthorization(*authorization) == nil
+	evidenceDigest, _ := model.EvidenceDigest(input)
+	authorized := authorization != nil && model.ValidateAuthorization(*authorization, run, evidenceDigest) == nil
 	return model.GateReport{
 		SchemaVersion:         model.SchemaVersion,
 		Kind:                  "gate-report",
 		RunID:                 run.RunID,
 		ProfileID:             run.ProfileID,
 		ProfileDigest:         run.ProfileDigest,
+		RecoveryCommit:        run.RecoveryCommit,
+		CheckpointDigest:      run.CheckpointDigest,
+		PlanDigest:            run.PlanDigest,
+		EvidenceDigest:        evidenceDigest,
 		Predicates:            input.Predicates,
 		AllMandatoryPass:      allPass,
 		Eligible:              allPass,

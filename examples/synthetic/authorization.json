@@ -1,5 +1,11 @@
 {
   "identity": "operator@example.invalid",
   "authorizedAt": "2026-01-01T00:00:00Z",
-  "pointOfNoReturnAcknowledged": true
+  "pointOfNoReturnAcknowledged": true,
+  "runID": "synthetic-001",
+  "profileDigest": "sha256:d993e3d93831da71b8dbde847b372a70dde8a290b3fc2f511c6c524b91774000",
+  "recoveryCommit": "0123456789abcdef0123456789abcdef01234567",
+  "checkpointDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "evidenceDigest": "sha256:42feec93a53399ef2591857f6bb4169ead6d217de793e906382ddfaba31e3144",
+  "planDigest": "sha256:1c16856fc064f5052f41b7b33ad206e9af396e563091ce747e0e3e2360e44559"
 }
