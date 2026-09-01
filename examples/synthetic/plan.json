@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "id": "synthetic-rebootstrap",
+  "profileDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "recoveryCommit": "0123456789abcdef0123456789abcdef01234567",
+  "planDigest": "sha256:c50838288549a7a290fec16f81eb1a27cf86a696e53e5516acd541720d5754a4",
+  "steps": [
+    {
+      "id": "quiesce-writers",
+      "phase": "decommission",
+      "kind": "operator-only",
+      "instruction": "Confirm all declared writers are quiesced and record the external checkpoint.",
+      "mutating": false,
+      "destructive": false,
+      "preconditions": ["operator has reviewed the final backup report"],
+      "stopConditions": ["any writer remains active"],
+      "observations": ["writer status receipt is present"],
+      "dependsOn": []
+    },
+    {
+      "id": "stop-old-nodes",
+      "phase": "decommission",
+      "kind": "delegated",
+      "argv": ["talosctl", "shutdown", "--nodes", "old-node-set"],
+      "mutating": true,
+      "destructive": false,
+      "preconditions": ["quiesce-writers receipt passed"],
+      "stopConditions": ["any node reports an unexpected writer"],
+      "observations": ["all old nodes report powered off"],
+      "dependsOn": ["quiesce-writers"]
+    },
+    {
+      "id": "bootstrap-talos",
+      "phase": "bootstrap",
+      "kind": "delegated",
+      "argv": ["clustertool", "bootstrap", "--plan", "talos-plan.json"],
+      "mutating": true,
+      "destructive": false,
+      "preconditions": ["old nodes are powered off"],
+      "stopConditions": ["new control plane does not report healthy"],
+      "observations": ["new etcd and Kubernetes API are healthy"],
+      "dependsOn": ["stop-old-nodes"]
+    },
+    {
+      "id": "establish-flux",
+      "phase": "bootstrap",
+      "kind": "delegated",
+      "argv": ["flux", "bootstrap", "github", "--path", "clusters/main/kubernetes"],
+      "mutating": true,
+      "destructive": false,
+      "preconditions": ["new API is healthy", "recovery commit is pinned"],
+      "stopConditions": ["Flux source is not at the pinned recovery commit"],
+      "observations": ["foundation Kustomization is Ready"],
+      "dependsOn": ["bootstrap-talos"]
+    },
+    {
+      "id": "restore-storage",
+      "phase": "restore",
+      "kind": "agent-assisted",
+      "instruction": "Restore the pinned Longhorn and CNPG sources in bounded waves and attach receipts.",
+      "mutating": true,
+      "destructive": false,
+      "preconditions": ["foundation receipt passed", "backup checkpoint is readable"],
+      "stopConditions": ["a source digest differs from the checkpoint"],
+      "observations": ["all required restore receipts are artifact-verified"],
+      "dependsOn": ["establish-flux"]
+    },
+    {
+      "id": "enable-consumers",
+      "phase": "recommission",
+      "kind": "automatic",
+      "instruction": "Enable only consumers whose restore receipt and semantic check passed.",
+      "mutating": true,
+      "destructive": false,
+      "preconditions": ["restore receipts passed"],
+      "stopConditions": ["a consumer lacks a functional receipt"],
+      "observations": ["enabled consumer health checks pass"],
+      "dependsOn": ["restore-storage"]
+    },
+    {
+      "id": "retire-old-disks",
+      "phase": "decommission",
+      "kind": "operator-only",
+      "instruction": "Retire the explicitly listed old disks after acceptance and retention review.",
+      "mutating": true,
+      "destructive": true,
+      "preconditions": ["application acceptance passed", "retention deadline has passed"],
+      "stopConditions": ["any target is not an explicitly reviewed disk"],
+      "observations": ["operator records each target and its retirement receipt"],
+      "dependsOn": ["enable-consumers"],
+      "confirmation": {
+        "required": true,
+        "prompt": "Retire only the listed old disks; this is irreversible.",
+        "acknowledgeWith": "I confirm the listed disk targets and understand the irreversible data-loss boundary."
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "invalid-shell",
+  "profileDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "recoveryCommit": "0123456789abcdef0123456789abcdef01234567",
+  "planDigest": "sha256:b95d24f79a4dd042632ed2f9a4fa70a0feb685c331ae1ee6c1b4023a39827fd1",
+  "steps": [
+    {
+      "id": "unsafe",
+      "phase": "bootstrap",
+      "kind": "delegated",
+      "argv": ["kubectl", "apply", "-f", "x;rm -rf /"],
+      "mutating": true,
+      "destructive": false,
+      "preconditions": ["fixture"],
+      "stopConditions": ["fixture"],
+      "observations": ["fixture"],
+      "dependsOn": []
+    }
+  ]
+}

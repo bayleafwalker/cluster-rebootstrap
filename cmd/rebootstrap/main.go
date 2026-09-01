@@ -8,11 +8,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bayleafwalker/cluster-rebootstrap/internal/gate"
 	"github.com/bayleafwalker/cluster-rebootstrap/internal/model"
+	"github.com/bayleafwalker/cluster-rebootstrap/internal/plan"
 	"github.com/bayleafwalker/cluster-rebootstrap/internal/run"
 )
 
@@ -36,9 +38,142 @@ func execute(args []string) error {
 		return statusCommand(args[1:])
 	case "report":
 		return reportCommand(args[1:])
+	case "plan":
+		return planCommand(args[1:])
 	default:
 		return usageError()
 	}
+}
+
+func planCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: rebootstrap plan validate|digest|render|dry-run --file PLAN")
+	}
+	switch args[0] {
+	case "validate":
+		p, err := loadPlan(args[1:])
+		if err != nil {
+			return err
+		}
+		if err := p.Validate(); err != nil {
+			return err
+		}
+		return printCanonical(map[string]any{"schemaVersion": 1, "status": "PASS", "planID": p.ID, "planDigest": p.PlanDigest})
+	case "digest":
+		p, err := loadPlan(args[1:])
+		if err != nil {
+			return err
+		}
+		digest, err := p.CanonicalDigest()
+		if err != nil {
+			return err
+		}
+		fmt.Println(digest)
+		return nil
+	case "render":
+		p, err := loadPlan(args[1:])
+		if err != nil {
+			return err
+		}
+		if err := p.Validate(); err != nil {
+			return err
+		}
+		return renderPlan(p)
+	case "dry-run":
+		return dryRunPlan(args[1:])
+	default:
+		return errors.New("usage: rebootstrap plan validate|digest|render|dry-run --file PLAN")
+	}
+}
+
+func loadPlan(args []string) (plan.Plan, error) {
+	flags := flag.NewFlagSet("plan", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("file", "", "typed execution plan JSON")
+	if err := flags.Parse(args); err != nil {
+		return plan.Plan{}, err
+	}
+	if *path == "" {
+		return plan.Plan{}, errors.New("--file is required")
+	}
+	file, err := os.Open(*path)
+	if err != nil {
+		return plan.Plan{}, fmt.Errorf("open plan: %w", err)
+	}
+	defer file.Close()
+	return plan.Decode(file)
+}
+
+func renderPlan(p plan.Plan) error {
+	fmt.Printf("PLAN %s\nDigest: %s\nProfile: %s\nRecovery commit: %s\n", p.ID, p.PlanDigest, p.ProfileDigest, p.RecoveryCommit)
+	for index, step := range p.Steps {
+		fmt.Printf("\n%02d. [%s] %s/%s", index+1, step.Kind, step.Phase, step.ID)
+		if step.Mutating {
+			fmt.Print(" mutating")
+		}
+		if step.Destructive {
+			fmt.Print(" DESTRUCTIVE")
+		}
+		fmt.Println()
+		if len(step.DependsOn) > 0 {
+			fmt.Printf("    depends on: %s\n", strings.Join(step.DependsOn, ", "))
+		}
+		if len(step.Argv) > 0 {
+			quoted := make([]string, len(step.Argv))
+			for index, arg := range step.Argv {
+				quoted[index] = strconv.Quote(arg)
+			}
+			fmt.Printf("    argv: %s\n", strings.Join(quoted, " "))
+		} else {
+			fmt.Printf("    instruction: %s\n", step.Instruction)
+		}
+		fmt.Printf("    preconditions: %s\n    STOP: %s\n    observe: %s\n", strings.Join(step.Preconditions, " | "), strings.Join(step.StopConditions, " | "), strings.Join(step.Observations, " | "))
+		if step.Confirmation != nil {
+			fmt.Printf("    operator confirmation: %s\n", step.Confirmation.Prompt)
+			fmt.Printf("    acknowledgement text: %s\n", step.Confirmation.AcknowledgeWith)
+		}
+	}
+	return nil
+}
+
+func dryRunPlan(args []string) error {
+	flags := flag.NewFlagSet("plan dry-run", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("file", "", "typed execution plan JSON")
+	confirmationPath := flags.String("confirmation", "", "optional operator confirmation JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *path == "" {
+		return errors.New("--file is required")
+	}
+	p, err := loadPlan([]string{"--file", *path})
+	if err != nil {
+		return err
+	}
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	if *confirmationPath != "" {
+		confirmation, err := loadJSON[plan.OperatorConfirmation](*confirmationPath)
+		if err != nil {
+			return err
+		}
+		if err := confirmation.Validate(p); err != nil {
+			return err
+		}
+		fmt.Println("PASS: confirmation is bound to this plan; no commands executed")
+		return nil
+	}
+	fmt.Println("DRY-RUN: no commands executed")
+	for _, step := range p.Steps {
+		if step.Destructive {
+			fmt.Printf("STOP: %s requires operator confirmation (%s)\n", step.ID, step.Confirmation.Prompt)
+		} else {
+			fmt.Printf("WOULD RUN: %s/%s [%s]\n", step.Phase, step.ID, step.Kind)
+		}
+	}
+	return nil
 }
 
 func profileCommand(args []string) error {
@@ -278,5 +413,5 @@ func rootCause(err error) error {
 }
 
 func usageError() error {
-	return errors.New("usage: rebootstrap profile validate | gate evaluate | status | report")
+	return errors.New("usage: rebootstrap profile validate | gate evaluate | plan validate|digest|render|dry-run | status | report")
 }
