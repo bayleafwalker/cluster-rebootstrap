@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "predicates": {
+    "G1": {"status": "PASS", "evidence": ["synthetic recovery render passed"]},
+    "G2": {"status": "PASS", "evidence": ["synthetic inventory has no unknowns"]},
+    "G3": {"status": "PASS", "evidence": ["synthetic dry-run completed"]}
+  }
+}

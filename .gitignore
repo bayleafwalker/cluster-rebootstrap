@@ -1,0 +1,5 @@
+/rebootstrap
+/bin/
+/dist/
+*.test
+.DS_Store

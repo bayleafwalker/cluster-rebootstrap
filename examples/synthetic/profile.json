@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "synthetic-cluster-rebuild",
+  "mandatoryPredicates": [
+    {"id": "G1", "description": "Recovery desired state is ready"},
+    {"id": "G2", "description": "Every retained state source is known and usable"},
+    {"id": "G3", "description": "Recovery tooling is ready"}
+  ]
+}
