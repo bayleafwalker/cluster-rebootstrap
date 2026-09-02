@@ -240,12 +240,7 @@ func ValidateRun(run Run) error {
 }
 
 func EvidenceDigest(input GateInput) (string, error) {
-	canonical, err := CanonicalJSON(input)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(canonical)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	return Digest(input)
 }
 
 func ValidateGateReport(report GateReport, run Run) error {
@@ -292,7 +287,24 @@ func ValidateGateReport(report GateReport, run Run) error {
 }
 
 func ProfileDigest(p Profile) (string, error) {
-	canonical, err := CanonicalJSON(p)
+	return Digest(p)
+}
+
+// CanonicalDigestBytes is the single canonical encoding this repository digests:
+// encoding/json of the typed value, with no trailing newline. Struct field order
+// is fixed by declaration and encoding/json emits map keys in sorted order, so
+// the encoding is deterministic for a given typed value.
+//
+// Every digest in this repository — model.ProfileDigest, model.EvidenceDigest,
+// and plan.Plan.CanonicalDigest — is sha256 over these bytes and no other rule.
+func CanonicalDigestBytes(value any) ([]byte, error) {
+	return json.Marshal(value)
+}
+
+// Digest is the one digest rule: sha256 over CanonicalDigestBytes, rendered as
+// "sha256:" followed by lowercase hex.
+func Digest(value any) (string, error) {
+	canonical, err := CanonicalDigestBytes(value)
 	if err != nil {
 		return "", err
 	}
@@ -300,8 +312,12 @@ func ProfileDigest(p Profile) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// CanonicalJSON is CanonicalDigestBytes plus a single trailing newline. It is
+// the line format for the NDJSON event journal, the atomically replaced
+// projections, and stdout receipts. It is never a digest input: the newline is
+// a framing byte, not part of the canonical value.
 func CanonicalJSON(value any) ([]byte, error) {
-	encoded, err := json.Marshal(value)
+	encoded, err := CanonicalDigestBytes(value)
 	if err != nil {
 		return nil, err
 	}

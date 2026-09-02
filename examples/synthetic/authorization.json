@@ -3,9 +3,9 @@
   "authorizedAt": "2026-01-01T00:00:00Z",
   "pointOfNoReturnAcknowledged": true,
   "runID": "synthetic-001",
-  "profileDigest": "sha256:d993e3d93831da71b8dbde847b372a70dde8a290b3fc2f511c6c524b91774000",
+  "profileDigest": "sha256:c458284e9dbc75c79f33e80947106cb023b753d1e461907d2153b40a22ae65a2",
   "recoveryCommit": "0123456789abcdef0123456789abcdef01234567",
   "checkpointDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-  "evidenceDigest": "sha256:42feec93a53399ef2591857f6bb4169ead6d217de793e906382ddfaba31e3144",
-  "planDigest": "sha256:1c16856fc064f5052f41b7b33ad206e9af396e563091ce747e0e3e2360e44559"
+  "evidenceDigest": "sha256:bb891ba2ea8cb0debc9a968eefa1bdd9d5e3d95c81bcc75e43ad7816baf6153d",
+  "planDigest": "sha256:18a86974ad0ca0e204a589e8336d7261c0c10ddf8a848b0d5c3f59dfaba86765"
 }

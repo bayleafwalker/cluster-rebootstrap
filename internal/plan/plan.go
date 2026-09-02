@@ -1,8 +1,6 @@
 package plan
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +10,41 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bayleafwalker/cluster-rebootstrap/internal/model"
 )
+
+// Phase is a rebootstrap phase. decision-gate.md requires a delegated plan for
+// each of these five phases, so each must be expressible as a plan.
+type Phase string
+
+const (
+	Decommission Phase = "decommission"
+	Bootstrap    Phase = "bootstrap"
+	Restore      Phase = "restore"
+	Resume       Phase = "resume"
+	Recommission Phase = "recommission"
+)
+
+// Phases lists every phase in execution order.
+var Phases = []Phase{Decommission, Bootstrap, Restore, Resume, Recommission}
+
+func (p Phase) Valid() bool {
+	switch p {
+	case Decommission, Bootstrap, Restore, Resume, Recommission:
+		return true
+	default:
+		return false
+	}
+}
+
+func phaseList() string {
+	names := make([]string, len(Phases))
+	for index, phase := range Phases {
+		names[index] = string(phase)
+	}
+	return strings.Join(names[:len(names)-1], ", ") + ", or " + names[len(names)-1]
+}
 
 type StepKind string
 
@@ -37,7 +69,7 @@ type ConfirmationRequirement struct {
 
 type Step struct {
 	ID             string                   `json:"id"`
-	Phase          string                   `json:"phase"`
+	Phase          Phase                    `json:"phase"`
 	Kind           StepKind                 `json:"kind"`
 	Adapter        string                   `json:"adapter,omitempty"`
 	Executable     string                   `json:"executable,omitempty"`
@@ -55,6 +87,7 @@ type Step struct {
 type Plan struct {
 	SchemaVersion    int    `json:"schemaVersion"`
 	ID               string `json:"id"`
+	Phase            Phase  `json:"phase"`
 	ProfileDigest    string `json:"profileDigest"`
 	RecoveryCommit   string `json:"recoveryCommit"`
 	CheckpointDigest string `json:"checkpointDigest,omitempty"`
@@ -93,17 +126,19 @@ func Encode(w io.Writer, p Plan) error {
 	return encoder.Encode(p)
 }
 
-// CanonicalDigest hashes the typed JSON representation with the digest field blank.
-// Struct field order is fixed and encoding/json emits deterministic object keys.
+// CanonicalDigest hashes the typed plan with the stored digest field blank, so a
+// plan's digest is independent of the digest recorded inside it.
+//
+// It uses model.Digest, the repository-wide rule: sha256 over encoding/json of
+// the typed value, with no trailing newline. There is no second rule.
 func (p Plan) CanonicalDigest() (string, error) {
-	copy := p
-	copy.PlanDigest = ""
-	data, err := json.Marshal(copy)
+	bare := p
+	bare.PlanDigest = ""
+	digest, err := model.Digest(bare)
 	if err != nil {
 		return "", fmt.Errorf("canonical plan: %w", err)
 	}
-	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	return digest, nil
 }
 
 func (p Plan) ValidatedDigest() (string, error) {
@@ -119,6 +154,9 @@ func (p Plan) Validate() error {
 	}
 	if !idPattern.MatchString(p.ID) {
 		return errors.New("id must be a safe non-empty identifier")
+	}
+	if !p.Phase.Valid() {
+		return fmt.Errorf("plan phase must be %s", phaseList())
 	}
 	if !sha256Pattern.MatchString(p.ProfileDigest) {
 		return errors.New("profileDigest must be a lowercase sha256 digest")
@@ -144,7 +182,7 @@ func (p Plan) Validate() error {
 	}
 	steps := make(map[string]Step, len(p.Steps))
 	for _, step := range p.Steps {
-		if err := validateStep(step); err != nil {
+		if err := validateStep(step, p.Phase); err != nil {
 			return fmt.Errorf("step %q: %w", step.ID, err)
 		}
 		if _, exists := steps[step.ID]; exists {
@@ -165,14 +203,17 @@ func (p Plan) Validate() error {
 	return nil
 }
 
-func validateStep(step Step) error {
+func validateStep(step Step, planPhase Phase) error {
 	if !idPattern.MatchString(step.ID) {
 		return errors.New("id must be a safe non-empty identifier")
 	}
-	switch step.Phase {
-	case "decommission", "bootstrap", "restore", "recommission":
-	default:
-		return errors.New("phase must be decommission, bootstrap, restore, or recommission")
+	if !step.Phase.Valid() {
+		return fmt.Errorf("phase must be %s", phaseList())
+	}
+	// Plans are phase-homogeneous: one plan per phase, so a phase's own
+	// preconditions and STOP conditions cannot be smuggled into another's.
+	if step.Phase != planPhase {
+		return fmt.Errorf("phase %q does not match plan phase %q", step.Phase, planPhase)
 	}
 	switch step.Kind {
 	case Automatic, Delegated, AgentAssisted, OperatorOnly:
