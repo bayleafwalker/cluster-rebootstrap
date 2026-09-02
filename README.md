@@ -14,8 +14,11 @@ cluster, a Git forge, an object store, or an in-cluster service. It provides:
 - canonical JSON reports suitable for external receipt storage; and
 - an explicit operator authorization boundary.
 - typed, digest-bound, phase-homogeneous plans, one per phase:
-  decommission, bootstrap, restore, resume, and recommission; and
-- plan validation, human rendering, and non-executing dry-runs.
+  decommission, bootstrap, restore, resume, and recommission;
+- plan validation, anchor binding, human rendering, an operator run sheet, and
+  non-executing dry-runs; and
+- a canonical build identity, so a plan or gate report can name the exact tool
+  that produced it.
 
 ## Gate semantics
 
@@ -27,6 +30,20 @@ when a separate, valid operator-authorization document is supplied with
 Authorization is bound to the run ID, profile digest, recovery commit,
 checkpoint digest, evidence digest, and execution-plan digest. A document from
 another run or checkpoint is rejected before a new run is created.
+
+`gate evaluate` writes the full canonical report to stdout either way, and then
+sets its exit code from the decision:
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | `GO` |
+| `1` | `NO-GO` — a complete, valid verdict that is not a GO |
+| `2` | an input could not be read or parsed; there is no verdict |
+
+`1` and `2` are kept apart deliberately: a wrapper must never mistake an
+unreadable evidence file for a considered NO-GO. These are the same codes the
+operating repository's decision-gate evaluator uses, so one wrapper drives
+either.
 
 No command in this release performs cluster mutation.
 
@@ -52,6 +69,65 @@ Validation rejects stale digests, an unknown or mismatched phase, unknown
 dependencies, dependency cycles, and destructive steps without explicit
 confirmation requirements. A confirmation record is valid only for its exact
 plan digest and must acknowledge every destructive step.
+
+### Binding a plan to real anchors
+
+Because a plan is digest-bound, filling in an anchor by hand invalidates it
+until the digest is recomputed by hand too. `plan bind` is the supported way:
+it takes an authored plan whose anchors are placeholders, substitutes the real
+ones, re-derives the plan digest, and validates the result before writing it.
+
+```sh
+rebootstrap plan bind --file authored.json \
+  --profile-digest sha256:… \
+  --recovery-commit 0123456789abcdef0123456789abcdef01234567 \
+  [--checkpoint-digest sha256:…] \
+  [--out bound.json]
+```
+
+`--checkpoint-digest` is optional, which is what lets a plan be frozen before
+the quiesced window has produced a checkpoint. Bind is not a plan editor: it
+copies steps verbatim and refuses a plan carrying a destructive step without a
+confirmation requirement, so rebinding cannot launder an unsafe plan into an
+executable one.
+
+### Rendering
+
+`plan render` has two formats and they serve different readers.
+
+```sh
+rebootstrap plan render --file PLAN [--format text|runsheet] [--out FILE]
+```
+
+`--format text` (the default) is the flat listing: a digest check for a
+reviewer who already knows the plan. Its bytes are frozen.
+
+`--format runsheet` writes the outage run sheet — a Markdown document worked
+top to bottom, grouped by phase, with a header binding it to the plan digest,
+recovery commit, checkpoint digest, and rendering CLI version; an up-front
+index of every step needing the operator in person; a banner on every
+destructive step; and checkboxes for STOP conditions, preconditions, and
+observations. Every STOP condition and confirmation prompt is printed **above**
+the command it guards, because a warning under a command is read after the
+command has been run. See [`docs/run-sheet.md`](docs/run-sheet.md).
+
+Rendering is pure. `internal/render` has no `os/exec`, `os`, or `net` import;
+it turns a plan into bytes and never executes a step's argv.
+
+### Build identity
+
+```sh
+rebootstrap version
+{"buildDate":"…","commit":"…","schemaVersion":1,"version":"v0.1.0"}
+```
+
+`version` prints this binary's identity as canonical JSON so a plan, a run, or
+a gate report can bind to the exact tool that produced it. `commit` and
+`buildDate` come from the Go toolchain's VCS stamp — the revision built from
+and its timestamp — with `-dirty` appended when the tree had uncommitted
+changes. A binary reporting `"version":"dev"`, `"commit":"unknown"`, or a
+`-dirty` suffix was not produced by the pinned release pipeline; see
+[`RELEASING.md`](RELEASING.md).
 
 ## The digest rule
 
@@ -99,7 +175,11 @@ go run ./cmd/rebootstrap reconcile --run /tmp/rebootstrap-run
 go run ./cmd/rebootstrap plan validate --file examples/synthetic/plan.json
 go run ./cmd/rebootstrap plan digest --file examples/synthetic/plan.json
 go run ./cmd/rebootstrap plan render --file examples/synthetic/plan.json
+go run ./cmd/rebootstrap plan render --file examples/synthetic/plan.json \
+  --format runsheet --out /tmp/run-sheet.md
 go run ./cmd/rebootstrap plan dry-run --file examples/synthetic/plan.json
+
+go run ./cmd/rebootstrap version
 ```
 
 `examples/synthetic/plan.json` is a `resume` plan: it classifies the outcome of
@@ -125,6 +205,10 @@ go test ./...
 go test -race ./...
 go vet ./...
 ```
+
+`examples/synthetic/runsheet.golden.md` is the run sheet rendered from the
+synthetic plan, checked in. Any drift in its wording or ordering fails
+`TestRunsheetMatchesGolden`; regenerate it only when the change is intended.
 
 The CLI deliberately does not execute plan argv values yet. Cluster/Talos/Flux
 adapters remain a later, separately reviewed slice.
