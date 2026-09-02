@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          check-latest: false
+
+      - name: gofmt
+        run: |
+          fmt_out="$(gofmt -l cmd internal)"
+          if [ -n "$fmt_out" ]; then
+            echo "gofmt found unformatted files:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: go test -race
+        run: go test -race ./...
+
+      - name: site-vocabulary guard
+        run: |
+          # G3 pins recovery tooling that has to work for any cluster this
+          # tool is pointed at. A site-specific noun leaking into internal/**
+          # or cmd/** (outside adapters, which legitimately name real
+          # tooling, and test fixtures) means the tool has quietly coupled
+          # itself to one deployment instead of staying generic.
+          pattern='appservice|longhorn|cnpg|cilium|openbao|talos|flux|k3s|nfs'
+          hits="$(grep -rniE "$pattern" cmd internal \
+            --include='*.go' \
+            | grep -v '_test\.go:' \
+            | grep -v '^internal/adapters/' || true)"
+          if [ -n "$hits" ]; then
+            echo "site-specific vocabulary found outside internal/adapters and test fixtures:"
+            echo "$hits"
+            exit 1
+          fi

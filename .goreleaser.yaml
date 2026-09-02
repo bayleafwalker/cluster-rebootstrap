@@ -1,0 +1,51 @@
+version: 2
+
+project_name: rebootstrap
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: rebootstrap
+    main: ./cmd/rebootstrap
+    binary: rebootstrap
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/bayleafwalker/cluster-rebootstrap/internal/version.Version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
+
+archives:
+  - id: rebootstrap
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# Only linux/amd64, linux/arm64, and darwin/arm64 are shipped (see the
+# darwin/amd64 ignore rule above) — the clean-room recovery machine this
+# tool targets is one of those three.
+
+release:
+  github:
+    owner: bayleafwalker
+    name: cluster-rebootstrap
+  # The tag is cut and pushed by the operator (see RELEASING.md); this
+  # pipeline only builds and publishes once that tag lands.
+
+changelog:
+  disable: true
